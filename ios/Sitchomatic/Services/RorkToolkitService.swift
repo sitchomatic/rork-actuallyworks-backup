@@ -428,7 +428,7 @@ final class RorkToolkitService {
             }
 
             guard let url = URL(string: "\(baseURL)\(endpoint)") else {
-                GrokUsageStats.shared.recordFailure(error: "Invalid URL")
+                GrokUsageStats.shared.recordFailure(error: "Invalid URL", model: model)
                 return nil
             }
 
@@ -450,7 +450,7 @@ final class RorkToolkitService {
                 lastStatus = http.statusCode
 
                 if http.statusCode == 429 || http.statusCode >= 500 {
-                    lastError = "HTTP \(http.statusCode)"
+                    lastError = http.statusCode == 429 ? "Rate limited (429)" : "Server error (\(http.statusCode))"
                     logger.log("GrokAI: \(lastError) on attempt \(attempt + 1), retrying…", category: .automation, level: .warning)
                     continue
                 }
@@ -498,7 +498,12 @@ final class RorkToolkitService {
 
                 lastError = "Empty response"
             } catch {
-                lastError = error.localizedDescription
+                let nsError = error as NSError
+                if nsError.domain == NSURLErrorDomain {
+                    lastError = "Network error: \(error.localizedDescription)"
+                } else {
+                    lastError = error.localizedDescription
+                }
                 logger.log("GrokAI: request error on attempt \(attempt + 1) — \(lastError)", category: .automation, level: .warning)
             }
         }
