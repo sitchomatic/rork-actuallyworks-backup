@@ -3,9 +3,13 @@ import SwiftUI
 @Observable
 final class GrokAIStatusViewModel {
     var isTestingConnection: Bool = false
+    var isTestingVision: Bool = false
     var testResult: String? = nil
     var testSuccess: Bool = false
     var testLatencyMs: Int = 0
+    var visionTestResult: String? = nil
+    var visionTestSuccess: Bool = false
+    var visionTestLatencyMs: Int = 0
 
     func runConnectionTest() async {
         isTestingConnection = true
@@ -14,9 +18,25 @@ final class GrokAIStatusViewModel {
         isTestingConnection = false
         testSuccess = result.success
         testLatencyMs = result.latencyMs
-        testResult = result.success
-            ? "Connected — \(result.latencyMs) ms via \(result.model)"
-            : "Connection failed — check API key"
+        if result.success {
+            testResult = "Connected — \(result.latencyMs) ms via \(result.model)"
+        } else {
+            testResult = "Failed: \(result.errorDetail)"
+        }
+    }
+
+    func runVisionTest() async {
+        isTestingVision = true
+        visionTestResult = nil
+        let result = await RorkToolkitService.shared.testVisionConnection()
+        isTestingVision = false
+        visionTestSuccess = result.success
+        visionTestLatencyMs = result.latencyMs
+        if result.success {
+            visionTestResult = "Vision OK — \(result.latencyMs) ms via \(result.model)"
+        } else {
+            visionTestResult = "Failed: \(result.errorDetail)"
+        }
     }
 }
 
@@ -69,7 +89,7 @@ struct GrokAIStatusView: View {
 
             if isConfigured {
                 statusPill(label: "Primary Engine", value: "Grok API", color: .green)
-                statusPill(label: "Screenshot Vision", value: "grok-2-vision-latest", color: .blue)
+                statusPill(label: "Screenshot Vision", value: "grok-2-vision-1212", color: .blue)
                 statusPill(label: "Fallback Engine", value: "Apple Intelligence / Heuristic", color: .orange)
             } else {
                 statusPill(label: "Active Engine", value: "Heuristic Only", color: .orange)
@@ -136,19 +156,19 @@ struct GrokAIStatusView: View {
     private var modelsSection: some View {
         Section {
             modelRow(
-                name: "grok-3-fast",
+                name: "grok-3",
                 usage: "Login analysis, PPSR decisions, flow prediction",
                 icon: "bolt.fill",
                 color: .yellow
             )
             modelRow(
-                name: "grok-3-mini-fast",
+                name: "grok-3-mini",
                 usage: "OCR field mapping, email variants, lightweight tasks",
                 icon: "hare.fill",
                 color: .mint
             )
             modelRow(
-                name: "grok-2-vision-latest",
+                name: "grok-2-vision-1212",
                 usage: "Screenshot analysis — login results, payment outcomes",
                 icon: "eye.fill",
                 color: .indigo
@@ -192,12 +212,49 @@ struct GrokAIStatusView: View {
                     Text(result)
                         .font(.subheadline)
                         .foregroundStyle(vm.testSuccess ? Color.primary : Color.red)
+                        .lineLimit(3)
+                }
+            }
+
+            Button {
+                Task { await vm.runVisionTest() }
+            } label: {
+                HStack {
+                    Label("Test Vision", systemImage: "eye.trianglebadge.exclamationmark")
+                        .font(.subheadline.bold())
+                    Spacer()
+                    if vm.isTestingVision {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .disabled(vm.isTestingVision || !isConfigured)
+
+            if let visionResult = vm.visionTestResult {
+                HStack(spacing: 8) {
+                    Image(systemName: vm.visionTestSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(vm.visionTestSuccess ? .green : .red)
+                    Text(visionResult)
+                        .font(.subheadline)
+                        .foregroundStyle(vm.visionTestSuccess ? Color.primary : Color.red)
+                        .lineLimit(3)
+                }
+            }
+
+            if let visionStatus = stats.lastVisionCallSucceeded {
+                HStack(spacing: 8) {
+                    Image(systemName: visionStatus ? "eye.circle.fill" : "eye.slash.circle.fill")
+                        .foregroundStyle(visionStatus ? .green : .orange)
+                    Text(visionStatus ? "Last vision call succeeded" : "Last vision call failed")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         } header: {
             Label("Connection Test", systemImage: "wifi")
         } footer: {
-            Text("Sends a minimal test request to verify your Grok API key is valid and the connection is working.")
+            Text("Sends minimal test requests to verify your Grok API key and vision pipeline are working.")
         }
     }
 

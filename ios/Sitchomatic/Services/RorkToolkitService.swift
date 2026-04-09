@@ -13,7 +13,8 @@ final class GrokUsageStats {
     private(set) var totalTokensUsed: Int = 0
     private(set) var lastError: String?
     private(set) var lastCallTime: Date?
-    private(set) var currentModel: String = "grok-3-fast"
+    private(set) var currentModel: String = "grok-3"
+    private(set) var lastVisionCallSucceeded: Bool? = nil
 
     var successRate: Double {
         guard totalCalls > 0 else { return 0 }
@@ -26,6 +27,9 @@ final class GrokUsageStats {
         totalTokensUsed += tokens
         lastCallTime = Date()
         currentModel = model
+        if model == GrokModel.vision.rawValue {
+            lastVisionCallSucceeded = true
+        }
     }
 
     func recordFailure(error: String) {
@@ -35,6 +39,11 @@ final class GrokUsageStats {
         lastCallTime = Date()
     }
 
+    func recordVisionFailure(error: String) {
+        recordFailure(error: error)
+        lastVisionCallSucceeded = false
+    }
+
     func reset() {
         totalCalls = 0
         successfulCalls = 0
@@ -42,15 +51,16 @@ final class GrokUsageStats {
         totalTokensUsed = 0
         lastError = nil
         lastCallTime = nil
+        lastVisionCallSucceeded = nil
     }
 }
 
 // MARK: - Models
 
 nonisolated enum GrokModel: String, Sendable {
-    case standard = "grok-3-fast"
-    case mini = "grok-3-mini-fast"
-    case vision = "grok-2-vision-latest"
+    case standard = "grok-3"
+    case mini = "grok-3-mini"
+    case vision = "grok-2-vision-1212"
 }
 
 nonisolated struct GrokVisionAnalysisResult: Sendable {
@@ -210,15 +220,43 @@ final class RorkToolkitService {
 
     // MARK: API Test
 
-    func testConnection() async -> (success: Bool, latencyMs: Int, model: String) {
+    func testConnection() async -> (success: Bool, latencyMs: Int, model: String, errorDetail: String) {
         guard let key = apiKey, !key.isEmpty else {
-            return (false, 0, "")
+            return (false, 0, "", "No API key configured")
         }
         let start = Date()
         let result = await generateFast(systemPrompt: "You are a test assistant.", userPrompt: "Reply with exactly: OK")
         let latency = Int(Date().timeIntervalSince(start) * 1000)
-        let ok = result?.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("OK") == true
-        return (ok, latency, GrokModel.mini.rawValue)
+        if result != nil {
+            return (true, latency, GrokModel.mini.rawValue, "")
+        }
+        let errorDetail = GrokUsageStats.shared.lastError ?? "Unknown error"
+        return (false, latency, GrokModel.mini.rawValue, errorDetail)
+    }
+
+    func testVisionConnection() async -> (success: Bool, latencyMs: Int, model: String, errorDetail: String) {
+        guard let key = apiKey, !key.isEmpty else {
+            return (false, 0, "", "No API key configured")
+        }
+
+        // Create a tiny 1x1 test image
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1))
+        let testImage = renderer.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+
+        let start = Date()
+        let result = await analyzeScreenshotWithVision(
+            image: testImage,
+            prompt: "This is a test image. Reply with JSON: {\"confidence\": 100}"
+        )
+        let latency = Int(Date().timeIntervalSince(start) * 1000)
+        if result != nil {
+            return (true, latency, GrokModel.vision.rawValue, "")
+        }
+        let errorDetail = GrokUsageStats.shared.lastError ?? "Unknown error"
+        return (false, latency, GrokModel.vision.rawValue, errorDetail)
     }
 
     // MARK: - Private
@@ -258,14 +296,21 @@ final class RorkToolkitService {
                 guard let http = response as? HTTPURLResponse else { continue }
 
                 if http.statusCode == 429 || http.statusCode >= 500 {
-                    lastError = "HTTP \(http.statusCode)"
+                    lastError = http.statusCode == 429 ? "Rate limited (429)" : "Server error (\(http.statusCode))"
                     logger.log("GrokAI: \(lastError) on attempt \(attempt + 1), retrying…", category: .automation, level: .warning)
                     continue
                 }
 
                 if http.statusCode != 200 {
                     let body = String(data: data, encoding: .utf8) ?? ""
-                    lastError = "HTTP \(http.statusCode): \(body.prefix(120))"
+                    let description: String
+                    switch http.statusCode {
+                    case 401: description = "Invalid API key (401)"
+                    case 403: description = "Access denied (403)"
+                    case 404: description = "Model not found (404)"
+                    default: description = "HTTP \(http.statusCode): \(body.prefix(120))"
+                    }
+                    lastError = description
                     GrokUsageStats.shared.recordFailure(error: lastError)
                     logger.log("GrokAI: \(lastError)", category: .automation, level: .error)
                     return nil
@@ -287,7 +332,10 @@ final class RorkToolkitService {
                 }
 
             } catch {
-                lastError = error.localizedDescription
+                let desc = error.localizedDescription
+                lastError = desc.contains("Could not connect") || desc.contains("network") || desc.contains("Internet")
+                    ? "Network error: \(desc)"
+                    : desc
                 logger.log("GrokAI: request error on attempt \(attempt + 1) — \(lastError)", category: .automation, level: .warning)
             }
         }
