@@ -7,20 +7,37 @@ final class GrokAIStatusViewModel {
     var textTestResult: RorkToolkitService.GrokConnectionTestResult?
     var visionTestResult: RorkToolkitService.GrokConnectionTestResult?
 
+    var isTestingVision: Bool = false
+    var visionTestResult: String? = nil
+    var visionTestSuccess: Bool = false
+    var visionTestLatencyMs: Int = 0
+
     func runConnectionTest() async {
         isTestingText = true
         textTestResult = nil
         let result = await RorkToolkitService.shared.testConnection()
-        textTestResult = result
-        isTestingText = false
+        isTestingConnection = false
+        testSuccess = result.success
+        testLatencyMs = result.latencyMs
+        if result.success {
+            testResult = "Connected — \(result.latencyMs) ms via \(result.model)"
+        } else {
+            testResult = result.errorDetail ?? "Connection failed — check API key"
+        }
     }
 
     func runVisionTest() async {
         isTestingVision = true
         visionTestResult = nil
         let result = await RorkToolkitService.shared.testVisionConnection()
-        visionTestResult = result
         isTestingVision = false
+        visionTestSuccess = result.success
+        visionTestLatencyMs = result.latencyMs
+        if result.success {
+            visionTestResult = "Vision OK — \(result.latencyMs) ms via \(result.model)"
+        } else {
+            visionTestResult = result.errorDetail ?? "Vision test failed"
+        }
     }
 }
 
@@ -73,26 +90,18 @@ struct GrokAIStatusView: View {
 
             if isConfigured {
                 statusPill(label: "Primary Engine", value: "Grok API", color: .green)
-                statusPill(label: "Screenshot Vision", value: GrokModel.vision.rawValue, color: .blue)
+                statusPill(label: "Screenshot Vision", value: "grok-2-vision-1212", color: .blue)
                 statusPill(label: "Fallback Engine", value: "Apple Intelligence / Heuristic", color: .orange)
-                if let visionStatus = stats.lastVisionSuccess {
-                    statusPill(
-                        label: "Last Vision Call",
-                        value: visionStatus ? "Success" : "Failed",
-                        color: visionStatus ? .green : .red
-                    )
-                    if let visionError = stats.lastVisionError, !visionError.isEmpty, visionStatus == false {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                                .font(.caption)
-                            Text("Vision error: \(visionError)")
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                                .lineLimit(3)
-                        }
-                        .padding(.top, 2)
+                if let lastVisionTime = stats.lastVisionCallTime {
+                    HStack(spacing: 8) {
+                        Image(systemName: stats.lastVisionCallSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(stats.lastVisionCallSuccess ? .green : .red)
+                            .font(.caption)
+                        Text("Last vision call: \(stats.lastVisionCallSuccess ? "succeeded" : "failed") (\(lastVisionTime.formatted(.relative(presentation: .named))))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                    .padding(.vertical, 2)
                 }
             } else {
                 statusPill(label: "Active Engine", value: "Heuristic Only", color: .orange)
@@ -159,19 +168,19 @@ struct GrokAIStatusView: View {
     private var modelsSection: some View {
         Section {
             modelRow(
-                name: GrokModel.standard.rawValue,
+                name: "grok-3",
                 usage: "Login analysis, PPSR decisions, flow prediction",
                 icon: "bolt.fill",
                 color: .yellow
             )
             modelRow(
-                name: GrokModel.mini.rawValue,
+                name: "grok-3-mini",
                 usage: "OCR field mapping, email variants, lightweight tasks",
                 icon: "hare.fill",
                 color: .mint
             )
             modelRow(
-                name: GrokModel.vision.rawValue,
+                name: "grok-2-vision-1212",
                 usage: "Screenshot analysis — login results, payment outcomes",
                 icon: "eye.fill",
                 color: .indigo
@@ -216,8 +225,33 @@ struct GrokAIStatusView: View {
             if let visionResult = vm.visionTestResult {
                 testResultView(title: "Vision connectivity", result: visionResult)
             }
+
+            Button {
+                Task { await vm.runVisionTest() }
+            } label: {
+                HStack {
+                    Label("Test Vision", systemImage: "eye.circle.fill")
+                        .font(.subheadline.bold())
+                    Spacer()
+                    if vm.isTestingVision {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .disabled(vm.isTestingVision || !isConfigured)
+
+            if let visionResult = vm.visionTestResult {
+                HStack(spacing: 8) {
+                    Image(systemName: vm.visionTestSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(vm.visionTestSuccess ? .green : .red)
+                    Text(visionResult)
+                        .font(.subheadline)
+                        .foregroundStyle(vm.visionTestSuccess ? Color.primary : Color.red)
+                }
+            }
         } header: {
-            Label("Connection Test", systemImage: "wifi")
+            Label("Connection Tests", systemImage: "wifi")
         } footer: {
             Text("Runs lightweight text and vision pings to verify Grok connectivity. Shows exact errors for quick debugging.")
         }

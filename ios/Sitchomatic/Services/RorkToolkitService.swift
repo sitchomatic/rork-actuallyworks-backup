@@ -14,8 +14,8 @@ final class GrokUsageStats {
     private(set) var lastError: String?
     private(set) var lastCallTime: Date?
     private(set) var currentModel: String = "grok-3"
-    private(set) var lastVisionSuccess: Bool?
-    private(set) var lastVisionError: String?
+    private(set) var lastVisionCallSuccess: Bool = false
+    private(set) var lastVisionCallTime: Date?
 
     var successRate: Double {
         guard totalCalls > 0 else { return 0 }
@@ -28,9 +28,9 @@ final class GrokUsageStats {
         totalTokensUsed += tokens
         lastCallTime = Date()
         currentModel = model
-        if isVision {
-            lastVisionSuccess = true
-            lastVisionError = nil
+        if model.contains("vision") {
+            lastVisionCallSuccess = true
+            lastVisionCallTime = Date()
         }
     }
 
@@ -45,6 +45,15 @@ final class GrokUsageStats {
         }
     }
 
+    func recordVisionFailure(error: String) {
+        totalCalls += 1
+        failedCalls += 1
+        lastError = error
+        lastCallTime = Date()
+        lastVisionCallSuccess = false
+        lastVisionCallTime = Date()
+    }
+
     func reset() {
         totalCalls = 0
         successfulCalls = 0
@@ -52,8 +61,8 @@ final class GrokUsageStats {
         totalTokensUsed = 0
         lastError = nil
         lastCallTime = nil
-        lastVisionSuccess = nil
-        lastVisionError = nil
+        lastVisionCallSuccess = false
+        lastVisionCallTime = nil
     }
 }
 
@@ -242,47 +251,96 @@ final class RorkToolkitService {
 
     // MARK: API Test
 
-    func testConnection() async -> GrokConnectionTestResult {
+    func testConnection() async -> (success: Bool, latencyMs: Int, model: String, errorDetail: String?) {
         guard let key = apiKey, !key.isEmpty else {
-            return GrokConnectionTestResult(success: false, latencyMs: 0, model: GrokModel.mini.rawValue, statusCode: nil, error: "Missing API key")
+            return (false, 0, "", "No API key configured")
         }
         let start = Date()
+
+        var lastError: String?
+        guard let url = URL(string: "\(baseURL)/v1/chat/completions") else {
+            return (false, 0, "", "Invalid URL")
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 30
+
         let body: [String: Any] = [
             "model": GrokModel.mini.rawValue,
             "messages": [
-                ["role": "system", "content": "You are a test assistant."],
-                ["role": "user", "content": "Reply briefly to confirm connectivity."]
+                ["role": "user", "content": "Test"]
             ],
-            "temperature": 0.1
+            "temperature": 0.1,
+            "max_tokens": 10
         ]
-        let result = await callWithRetry(
-            endpoint: "/v1/chat/completions",
-            body: body,
-            key: key,
-            model: GrokModel.mini.rawValue
-        )
-        let latency = Int(Date().timeIntervalSince(start) * 1000)
-        let choices = result?.json?["choices"] as? [[String: Any]]
-        let ok = (result?.statusCode == 200) && (choices?.isEmpty == false)
-        let error = ok ? nil : (result?.error ?? "No response from API")
-        return GrokConnectionTestResult(
-            success: ok,
-            latencyMs: latency,
-            model: GrokModel.mini.rawValue,
-            statusCode: result?.statusCode,
-            error: error
-        )
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
+            return (false, 0, GrokModel.mini.rawValue, "Failed to serialize request")
+        }
+        req.httpBody = httpBody
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+
+            guard let http = response as? HTTPURLResponse else {
+                return (false, latency, GrokModel.mini.rawValue, "Invalid response type")
+            }
+
+            if http.statusCode == 401 {
+                return (false, latency, GrokModel.mini.rawValue, "Invalid API key (401)")
+            } else if http.statusCode == 404 {
+                let bodyStr = String(data: data, encoding: .utf8) ?? ""
+                if bodyStr.lowercased().contains("model") && bodyStr.lowercased().contains("not found") {
+                    return (false, latency, GrokModel.mini.rawValue, "Model '\(GrokModel.mini.rawValue)' not found (404)")
+                }
+                return (false, latency, GrokModel.mini.rawValue, "Not found (404)")
+            } else if http.statusCode == 429 {
+                return (false, latency, GrokModel.mini.rawValue, "Rate limited (429)")
+            } else if http.statusCode >= 500 {
+                return (false, latency, GrokModel.mini.rawValue, "Server error (\(http.statusCode))")
+            } else if http.statusCode != 200 {
+                let bodyStr = String(data: data, encoding: .utf8) ?? ""
+                return (false, latency, GrokModel.mini.rawValue, "HTTP \(http.statusCode): \(bodyStr.prefix(100))")
+            }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               !choices.isEmpty {
+                return (true, latency, GrokModel.mini.rawValue, nil)
+            }
+
+            return (false, latency, GrokModel.mini.rawValue, "Invalid response format — no choices array")
+
+        } catch {
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            return (false, latency, GrokModel.mini.rawValue, "Network error: \(error.localizedDescription)")
+        }
     }
 
-    func testVisionConnection() async -> GrokConnectionTestResult {
+    func testVisionConnection() async -> (success: Bool, latencyMs: Int, model: String, errorDetail: String?) {
         guard let key = apiKey, !key.isEmpty else {
-            return GrokConnectionTestResult(success: false, latencyMs: 0, model: GrokModel.vision.rawValue, statusCode: nil, error: "Missing API key")
+            return (false, 0, "", "No API key configured")
         }
 
-        let testImage = makeTestImage()
+        let testImage = createTestImage()
         guard let base64 = encodeImageForVision(testImage) else {
-            return GrokConnectionTestResult(success: false, latencyMs: 0, model: GrokModel.vision.rawValue, statusCode: nil, error: "Failed to encode test image")
+            return (false, 0, GrokModel.vision.rawValue, "Failed to encode test image")
         }
+
+        let start = Date()
+        guard let url = URL(string: "\(baseURL)/v1/chat/completions") else {
+            return (false, 0, "", "Invalid URL")
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 45
 
         let body: [String: Any] = [
             "model": GrokModel.vision.rawValue,
@@ -291,32 +349,65 @@ final class RorkToolkitService {
                     "role": "user",
                     "content": [
                         ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]],
-                        ["type": "text", "text": "Connectivity test. Confirm you can see the attached image. Keep the reply short."]
+                        ["type": "text", "text": "What color is this image?"]
                     ]
                 ]
             ],
-            "temperature": 0.1
+            "temperature": 0.1,
+            "max_tokens": 20
         ]
 
-        let start = Date()
-        let result = await callWithRetry(
-            endpoint: "/v1/chat/completions",
-            body: body,
-            key: key,
-            model: GrokModel.vision.rawValue,
-            isVision: true
-        )
-        let latency = Int(Date().timeIntervalSince(start) * 1000)
-        let choices = result?.json?["choices"] as? [[String: Any]]
-        let ok = (result?.statusCode == 200) && (choices?.isEmpty == false)
-        let error = ok ? nil : (result?.error ?? "No response from API")
-        return GrokConnectionTestResult(
-            success: ok,
-            latencyMs: latency,
-            model: GrokModel.vision.rawValue,
-            statusCode: result?.statusCode,
-            error: error
-        )
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
+            return (false, 0, GrokModel.vision.rawValue, "Failed to serialize request")
+        }
+        req.httpBody = httpBody
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+
+            guard let http = response as? HTTPURLResponse else {
+                return (false, latency, GrokModel.vision.rawValue, "Invalid response type")
+            }
+
+            if http.statusCode == 401 {
+                return (false, latency, GrokModel.vision.rawValue, "Invalid API key (401)")
+            } else if http.statusCode == 404 {
+                let bodyStr = String(data: data, encoding: .utf8) ?? ""
+                if bodyStr.lowercased().contains("model") && bodyStr.lowercased().contains("not found") {
+                    return (false, latency, GrokModel.vision.rawValue, "Model '\(GrokModel.vision.rawValue)' not found (404)")
+                }
+                return (false, latency, GrokModel.vision.rawValue, "Not found (404)")
+            } else if http.statusCode == 429 {
+                return (false, latency, GrokModel.vision.rawValue, "Rate limited (429)")
+            } else if http.statusCode >= 500 {
+                return (false, latency, GrokModel.vision.rawValue, "Server error (\(http.statusCode))")
+            } else if http.statusCode != 200 {
+                let bodyStr = String(data: data, encoding: .utf8) ?? ""
+                return (false, latency, GrokModel.vision.rawValue, "HTTP \(http.statusCode): \(bodyStr.prefix(100))")
+            }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               !choices.isEmpty {
+                return (true, latency, GrokModel.vision.rawValue, nil)
+            }
+
+            return (false, latency, GrokModel.vision.rawValue, "Invalid response format — no choices array")
+
+        } catch {
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            return (false, latency, GrokModel.vision.rawValue, "Network error: \(error.localizedDescription)")
+        }
+    }
+
+    private func createTestImage() -> UIImage {
+        let size = CGSize(width: 100, height: 100)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
     }
 
     // MARK: - Private
