@@ -22,7 +22,7 @@ final class GrokUsageStats {
         return Double(successfulCalls) / Double(totalCalls)
     }
 
-    func recordSuccess(tokens: Int, model: String) {
+    func recordSuccess(tokens: Int, model: String, isVision: Bool = false) {
         totalCalls += 1
         successfulCalls += 1
         totalTokensUsed += tokens
@@ -34,11 +34,15 @@ final class GrokUsageStats {
         }
     }
 
-    func recordFailure(error: String) {
+    func recordFailure(error: String, isVision: Bool = false) {
         totalCalls += 1
         failedCalls += 1
         lastError = error
         lastCallTime = Date()
+        if isVision {
+            lastVisionSuccess = false
+            lastVisionError = error
+        }
     }
 
     func recordVisionFailure(error: String) {
@@ -99,6 +103,22 @@ final class RorkToolkitService {
         GrokKeychain.shared.getAPIKey()
     }
 
+    struct GrokConnectionTestResult {
+        let success: Bool
+        let latencyMs: Int
+        let model: String
+        let statusCode: Int?
+        let error: String?
+    }
+
+    private struct GrokAPICallResult {
+        let content: String?
+        let json: [String: Any]?
+        let statusCode: Int
+        let error: String?
+        let model: String
+    }
+
     // MARK: Text Generation
 
     func generateText(
@@ -125,7 +145,10 @@ final class RorkToolkitService {
             body["response_format"] = ["type": "json_object"]
         }
 
-        return await callWithRetry(endpoint: "/v1/chat/completions", body: body, key: key, model: model.rawValue)
+        guard let result = await callWithRetry(endpoint: "/v1/chat/completions", body: body, key: key, model: model.rawValue) else {
+            return nil
+        }
+        return result.error == nil ? result.content : nil
     }
 
     func generateFast(systemPrompt: String, userPrompt: String) async -> String? {
@@ -162,12 +185,13 @@ final class RorkToolkitService {
             "temperature": 0.1,
         ]
 
-        guard let rawResponse = await callWithRetry(
+        guard let result = await callWithRetry(
             endpoint: "/v1/chat/completions",
             body: body,
             key: key,
-            model: GrokModel.vision.rawValue
-        ) else {
+            model: GrokModel.vision.rawValue,
+            isVision: true
+        ), result.error == nil, let rawResponse = result.content else {
             return nil
         }
 
@@ -392,9 +416,11 @@ final class RorkToolkitService {
         endpoint: String,
         body: [String: Any],
         key: String,
-        model: String
-    ) async -> String? {
+        model: String,
+        isVision: Bool = false
+    ) async -> GrokAPICallResult? {
         var lastError = ""
+        var lastStatus: Int = 0
         for attempt in 0..<maxRetries {
             if attempt > 0 {
                 let delay = pow(2.0, Double(attempt - 1)) * 0.5
@@ -413,7 +439,7 @@ final class RorkToolkitService {
             req.timeoutInterval = 45
 
             guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-                GrokUsageStats.shared.recordFailure(error: "Serialization failed")
+                GrokUsageStats.shared.recordFailure(error: "Serialization failed", isVision: isVision)
                 return nil
             }
             req.httpBody = httpBody
@@ -421,6 +447,7 @@ final class RorkToolkitService {
             do {
                 let (data, response) = try await URLSession.shared.data(for: req)
                 guard let http = response as? HTTPURLResponse else { continue }
+                lastStatus = http.statusCode
 
                 if http.statusCode == 429 || http.statusCode >= 500 {
                     lastError = "HTTP \(http.statusCode)"
@@ -431,9 +458,15 @@ final class RorkToolkitService {
                 if http.statusCode != 200 {
                     let body = String(data: data, encoding: .utf8) ?? ""
                     lastError = "HTTP \(http.statusCode): \(body.prefix(120))"
-                    GrokUsageStats.shared.recordFailure(error: lastError)
+                    GrokUsageStats.shared.recordFailure(error: lastError, isVision: isVision)
                     logger.log("GrokAI: \(lastError)", category: .automation, level: .error)
-                    return nil
+                    return GrokAPICallResult(
+                        content: nil,
+                        json: nil,
+                        statusCode: http.statusCode,
+                        error: lastError,
+                        model: model
+                    )
                 }
 
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -442,24 +475,43 @@ final class RorkToolkitService {
                    let message = first["message"] as? [String: Any],
                    let content = message["content"] as? String {
                     let tokens = (json["usage"] as? [String: Any])?["total_tokens"] as? Int ?? 0
-                    GrokUsageStats.shared.recordSuccess(tokens: tokens, model: model)
-                    return content
+                    GrokUsageStats.shared.recordSuccess(tokens: tokens, model: model, isVision: isVision)
+                    return GrokAPICallResult(
+                        content: content,
+                        json: json,
+                        statusCode: http.statusCode,
+                        error: nil,
+                        model: model
+                    )
                 }
 
                 if let text = String(data: data, encoding: .utf8) {
-                    GrokUsageStats.shared.recordSuccess(tokens: 0, model: model)
-                    return text
+                    GrokUsageStats.shared.recordSuccess(tokens: 0, model: model, isVision: isVision)
+                    return GrokAPICallResult(
+                        content: text,
+                        json: nil,
+                        statusCode: http.statusCode,
+                        error: nil,
+                        model: model
+                    )
                 }
 
+                lastError = "Empty response"
             } catch {
                 lastError = error.localizedDescription
                 logger.log("GrokAI: request error on attempt \(attempt + 1) — \(lastError)", category: .automation, level: .warning)
             }
         }
 
-        GrokUsageStats.shared.recordFailure(error: lastError)
+        GrokUsageStats.shared.recordFailure(error: lastError, isVision: isVision)
         logger.log("GrokAI: all \(maxRetries) attempts failed — \(lastError)", category: .automation, level: .error)
-        return nil
+        return GrokAPICallResult(
+            content: nil,
+            json: nil,
+            statusCode: lastStatus,
+            error: lastError,
+            model: model
+        )
     }
 
     private func encodeImageForVision(_ image: UIImage) -> String? {
@@ -481,6 +533,18 @@ final class RorkToolkitService {
             data = resized.jpegData(compressionQuality: quality)
         }
         return data?.base64EncodedString()
+    }
+
+    private func makeTestImage() -> UIImage {
+        let size = CGSize(width: 96, height: 96)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let path = UIBezierPath(roundedRect: CGRect(x: 18, y: 18, width: 60, height: 60), cornerRadius: 12)
+            UIColor.white.setFill()
+            path.fill()
+        }
     }
 
     private func parseVisionResponse(_ raw: String) -> GrokVisionAnalysisResult {
