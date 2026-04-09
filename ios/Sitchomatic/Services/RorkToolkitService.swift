@@ -32,16 +32,14 @@ final class GrokUsageStats {
         }
     }
 
-    func recordFailure(error: String) {
+    func recordFailure(error: String, model: String? = nil) {
         totalCalls += 1
         failedCalls += 1
         lastError = error
         lastCallTime = Date()
-    }
-
-    func recordVisionFailure(error: String) {
-        recordFailure(error: error)
-        lastVisionCallSucceeded = false
+        if model == GrokModel.vision.rawValue {
+            lastVisionCallSucceeded = false
+        }
     }
 
     func reset() {
@@ -275,7 +273,7 @@ final class RorkToolkitService {
             }
 
             guard let url = URL(string: "\(baseURL)\(endpoint)") else {
-                GrokUsageStats.shared.recordFailure(error: "Invalid URL")
+                GrokUsageStats.shared.recordFailure(error: "Invalid URL", model: model)
                 return nil
             }
 
@@ -286,7 +284,7 @@ final class RorkToolkitService {
             req.timeoutInterval = 45
 
             guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-                GrokUsageStats.shared.recordFailure(error: "Serialization failed")
+                GrokUsageStats.shared.recordFailure(error: "Serialization failed", model: model)
                 return nil
             }
             req.httpBody = httpBody
@@ -311,7 +309,7 @@ final class RorkToolkitService {
                     default: description = "HTTP \(http.statusCode): \(body.prefix(120))"
                     }
                     lastError = description
-                    GrokUsageStats.shared.recordFailure(error: lastError)
+                    GrokUsageStats.shared.recordFailure(error: lastError, model: model)
                     logger.log("GrokAI: \(lastError)", category: .automation, level: .error)
                     return nil
                 }
@@ -332,15 +330,17 @@ final class RorkToolkitService {
                 }
 
             } catch {
-                let desc = error.localizedDescription
-                lastError = desc.contains("Could not connect") || desc.contains("network") || desc.contains("Internet")
-                    ? "Network error: \(desc)"
-                    : desc
+                let nsError = error as NSError
+                if nsError.domain == NSURLErrorDomain {
+                    lastError = "Network error: \(error.localizedDescription)"
+                } else {
+                    lastError = error.localizedDescription
+                }
                 logger.log("GrokAI: request error on attempt \(attempt + 1) — \(lastError)", category: .automation, level: .warning)
             }
         }
 
-        GrokUsageStats.shared.recordFailure(error: lastError)
+        GrokUsageStats.shared.recordFailure(error: lastError, model: model)
         logger.log("GrokAI: all \(maxRetries) attempts failed — \(lastError)", category: .automation, level: .error)
         return nil
     }
