@@ -2,42 +2,21 @@ import SwiftUI
 
 @Observable
 final class GrokAIStatusViewModel {
-    var isTestingText: Bool = false
-    var isTestingVision: Bool = false
-    var textTestResult: RorkToolkitService.GrokConnectionTestResult?
-    var visionTestResult: RorkToolkitService.GrokConnectionTestResult?
-
-    var isTestingVision: Bool = false
-    var visionTestResult: String? = nil
-    var visionTestSuccess: Bool = false
-    var visionTestLatencyMs: Int = 0
+    var isTestingConnection: Bool = false
+    var testResult: String? = nil
+    var testSuccess: Bool = false
+    var testLatencyMs: Int = 0
 
     func runConnectionTest() async {
-        isTestingText = true
-        textTestResult = nil
+        isTestingConnection = true
+        testResult = nil
         let result = await RorkToolkitService.shared.testConnection()
         isTestingConnection = false
         testSuccess = result.success
         testLatencyMs = result.latencyMs
-        if result.success {
-            testResult = "Connected — \(result.latencyMs) ms via \(result.model)"
-        } else {
-            testResult = result.errorDetail ?? "Connection failed — check API key"
-        }
-    }
-
-    func runVisionTest() async {
-        isTestingVision = true
-        visionTestResult = nil
-        let result = await RorkToolkitService.shared.testVisionConnection()
-        isTestingVision = false
-        visionTestSuccess = result.success
-        visionTestLatencyMs = result.latencyMs
-        if result.success {
-            visionTestResult = "Vision OK — \(result.latencyMs) ms via \(result.model)"
-        } else {
-            visionTestResult = result.errorDetail ?? "Vision test failed"
-        }
+        testResult = result.success
+            ? "Connected — \(result.latencyMs) ms via \(result.model)"
+            : "Connection failed — check API key"
     }
 }
 
@@ -90,19 +69,8 @@ struct GrokAIStatusView: View {
 
             if isConfigured {
                 statusPill(label: "Primary Engine", value: "Grok API", color: .green)
-                statusPill(label: "Screenshot Vision", value: "grok-2-vision-1212", color: .blue)
+                statusPill(label: "Screenshot Vision", value: "grok-2-vision-latest", color: .blue)
                 statusPill(label: "Fallback Engine", value: "Apple Intelligence / Heuristic", color: .orange)
-                if let lastVisionTime = stats.lastVisionCallTime {
-                    HStack(spacing: 8) {
-                        Image(systemName: stats.lastVisionCallSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(stats.lastVisionCallSuccess ? .green : .red)
-                            .font(.caption)
-                        Text("Last vision call: \(stats.lastVisionCallSuccess ? "succeeded" : "failed") (\(lastVisionTime.formatted(.relative(presentation: .named))))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 2)
-                }
             } else {
                 statusPill(label: "Active Engine", value: "Heuristic Only", color: .orange)
                 HStack(spacing: 8) {
@@ -168,19 +136,19 @@ struct GrokAIStatusView: View {
     private var modelsSection: some View {
         Section {
             modelRow(
-                name: "grok-3",
+                name: "grok-3-fast",
                 usage: "Login analysis, PPSR decisions, flow prediction",
                 icon: "bolt.fill",
                 color: .yellow
             )
             modelRow(
-                name: "grok-3-mini",
+                name: "grok-3-mini-fast",
                 usage: "OCR field mapping, email variants, lightweight tasks",
                 icon: "hare.fill",
                 color: .mint
             )
             modelRow(
-                name: "grok-2-vision-1212",
+                name: "grok-2-vision-latest",
                 usage: "Screenshot analysis — login results, payment outcomes",
                 icon: "eye.fill",
                 color: .indigo
@@ -202,58 +170,34 @@ struct GrokAIStatusView: View {
 
     private var testSection: some View {
         Section {
-            testButton(
-                label: "Test Text Model",
-                systemImage: "network.badge.shield.half.filled",
-                isLoading: vm.isTestingText
-            ) {
-                await vm.runConnectionTest()
-            }
-
-            if let textResult = vm.textTestResult {
-                testResultView(title: "Text connectivity", result: textResult)
-            }
-
-            testButton(
-                label: "Test Vision",
-                systemImage: "eye.trianglebadge.exclamationmark.fill",
-                isLoading: vm.isTestingVision
-            ) {
-                await vm.runVisionTest()
-            }
-
-            if let visionResult = vm.visionTestResult {
-                testResultView(title: "Vision connectivity", result: visionResult)
-            }
-
             Button {
-                Task { await vm.runVisionTest() }
+                Task { await vm.runConnectionTest() }
             } label: {
                 HStack {
-                    Label("Test Vision", systemImage: "eye.circle.fill")
+                    Label("Test Connection", systemImage: "network.badge.shield.half.filled")
                         .font(.subheadline.bold())
                     Spacer()
-                    if vm.isTestingVision {
+                    if vm.isTestingConnection {
                         ProgressView()
                             .controlSize(.small)
                     }
                 }
             }
-            .disabled(vm.isTestingVision || !isConfigured)
+            .disabled(vm.isTestingConnection || !isConfigured)
 
-            if let visionResult = vm.visionTestResult {
+            if let result = vm.testResult {
                 HStack(spacing: 8) {
-                    Image(systemName: vm.visionTestSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(vm.visionTestSuccess ? .green : .red)
-                    Text(visionResult)
+                    Image(systemName: vm.testSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(vm.testSuccess ? .green : .red)
+                    Text(result)
                         .font(.subheadline)
-                        .foregroundStyle(vm.visionTestSuccess ? Color.primary : Color.red)
+                        .foregroundStyle(vm.testSuccess ? Color.primary : Color.red)
                 }
             }
         } header: {
-            Label("Connection Tests", systemImage: "wifi")
+            Label("Connection Test", systemImage: "wifi")
         } footer: {
-            Text("Runs lightweight text and vision pings to verify Grok connectivity. Shows exact errors for quick debugging.")
+            Text("Sends a minimal test request to verify your Grok API key is valid and the connection is working.")
         }
     }
 
@@ -287,68 +231,6 @@ struct GrokAIStatusView: View {
                 .font(.system(.subheadline, design: .monospaced, weight: .semibold))
                 .foregroundStyle(.primary)
         }
-    }
-
-    private func testButton(
-        label: String,
-        systemImage: String,
-        isLoading: Bool,
-        action: @escaping @Sendable () async -> Void
-    ) -> some View {
-        Button {
-            Task { await action() }
-        } label: {
-            HStack {
-                Label(label, systemImage: systemImage)
-                    .font(.subheadline.bold())
-                Spacer()
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-        }
-        .disabled(isLoading || !isConfigured)
-    }
-
-    private func testResultView(title: String, result: RorkToolkitService.GrokConnectionTestResult) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundStyle(result.success ? .green : .red)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(result.success ? "Connected in \(result.latencyMs) ms via \(result.model)" : failureText(for: result))
-                        .font(.subheadline)
-                        .foregroundStyle(result.success ? Color.primary : Color.red)
-                        .multilineTextAlignment(.leading)
-                }
-            }
-            if let code = result.statusCode, code > 0 {
-                Text("HTTP \(code)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            if let error = result.error, !result.success {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func failureText(for result: RorkToolkitService.GrokConnectionTestResult) -> String {
-        let code: String
-        if let status = result.statusCode, status > 0 {
-            code = " (HTTP \(status))"
-        } else {
-            code = ""
-        }
-        return "Failed\(code) in \(result.latencyMs) ms"
     }
 
     private func modelRow(name: String, usage: String, icon: String, color: Color) -> some View {
